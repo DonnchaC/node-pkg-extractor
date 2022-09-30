@@ -1,9 +1,9 @@
 # Node PKG Extractor
 
 A simple tool to extract files and resources embedded in a Node PKG-bundled binary.
-The [PKG](https://github.com/vercel/pkg) tool bundles assets inside a Virtual File System (VFS). 
+The [PKG](https://github.com/vercel/pkg) tool bundles assets inside a Virtual File System (VFS).
 
-It appears that both the Javascript bytecode and the original source files are includes in the VFS by default,
+It appears that both the Javascript bytecode and the original source files are included in the VFS by default,
 making it trivial to recover the source code for a PKG binary.
 
 ### Usage
