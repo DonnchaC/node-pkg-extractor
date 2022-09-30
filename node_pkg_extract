@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+import os
+import json
+import gzip
+import argparse
+import tempfile
+import subprocess
+
+
+def extract_binary(binary, output, deobfuscate):
+    with open(binary, 'rb') as f:
+        data = f.read()
+
+    # Find offsets to assets in binary
+    payload_config = data.find(b'PAYLOAD_POSITION = ') + 20
+    payload_size_config = data.find(b'PAYLOAD_SIZE = ') + 16
+
+    payload_offset = int(data[payload_config:payload_config + 18])
+    payload_size = int(data[payload_size_config:payload_size_config + 18])
+
+    payload_data = data[payload_offset:payload_offset + payload_size]
+    print(f"Found PKG payload at {payload_offset} with size {payload_size}")
+
+    # Load virtual filesystem mappings
+    common_js_end = data.find(b'exports.toNormalizedRealPath = toNormalizedRealPath;')
+    prelude_params = data[common_js_end:].split(b"\n")
+    prelude_data = {
+        "sourceMap": prelude_params[1],
+        "vfs": json.loads(prelude_params[3]),
+        "default_entrypoint": prelude_params[5].replace(b'"', b''),
+        "symlinks": json.loads(prelude_params[7]),
+        "filename_dict": json.loads(prelude_params[9]),
+        "compression": int(prelude_params[11]),
+    }
+
+    # Extract files from VFS (Virtual File System)
+    compress_mode = prelude_data["compression"]
+    file_map = {v: k for k, v in prelude_data["filename_dict"].items()}
+
+    CHUNK_MAP = {"0": "bytecode", "1": "source", "2": "directory", "3": "metadata"}
+    for file_path, chunks in prelude_data["vfs"].items():
+        if compress_mode:
+            file_path = expand_vfs_path(file_path, file_map)
+
+        file_chunks = {}
+        for chunk_type in sorted(chunks.keys()):
+            current_chunk = chunks[str(chunk_type)]
+            # print(f"Reading '{file_path}' chunk {chunk_type} (chunk type '{CHUNK_MAP[chunk_type]}')")
+            chunk_data = read_chunk(payload_data, start=current_chunk[0], size=current_chunk[1], compression=compress_mode)
+            file_chunks[CHUNK_MAP[chunk_type]] = chunk_data
+
+        # Write out source files to disk
+        if "source" in file_chunks:
+            destination_path = os.path.join(output, file_path.strip("/"))
+            os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+            # Only JS files not in node_modules. Otherwise we might fail trying to deobfuscating plaintext files.
+            if deobfuscate and "node_modules/" not in file_path:
+                print("Deobfuscating", destination_path)
+                js_source = deobfuscate_file(deobfuscate, file_chunks["source"])
+            else:
+                js_source = file_chunks["source"]
+
+            with open(destination_path, 'wb') as f:
+                f.write(js_source)
+            print(f"Wrote extracted file to {destination_path}")
+
+
+def deobfuscate_file(deobfuscate_cmd, js_source):
+    with tempfile.NamedTemporaryFile() as fp:
+        fp.write(js_source)
+        fp.seek(0)
+        return subprocess.check_output(deobfuscate_cmd.replace("{file}", fp.name).split(" "))
+
+
+def expand_vfs_path(path, file_map):
+    expanded_path = []
+    for path_item in path.split("/"):
+        if path_item in file_map:
+            expanded_path.append(file_map[path_item])
+        else:
+            raise ValueError(f"Failed to expand path '{path_item}' in {path}")
+    return "/".join(expanded_path)
+
+
+def read_chunk(data, start, size, compression=0):
+    chunk_data = data[start:start + size]
+    if compression == 1 and chunk_data.startswith(b"\x1f\x8b"):
+        return gzip.decompress(chunk_data)
+    elif compression == 2:
+        import brotli
+        return brotli.decompress(chunk_data)
+    elif compression == 0:
+        return chunk_data
+    else:
+        raise ValueError("Unknown compression mode or invalid data")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Extract assets from binary packed with node-pkg")
+    parser.add_argument("binary", help="PKG-built binary")
+    parser.add_argument("--output", "-o", default="extracted/")
+    parser.add_argument("--deobfuscate", "-d", type=str, help="Deobfuscate source files. Runs command "
+                        "with extracted JS files. (jsattacker {file})", default=None)
+    args = parser.parse_args()
+
+    print(f"Loading binary at {args.binary}")
+    extract_binary(args.binary, args.output, args.deobfuscate)
+
+
+if __name__ == "__main__":
+    main()
